@@ -7,6 +7,7 @@ This does NOT require a modified installation of Higgs v2, you will simply add a
 ## Here is a list of the options that are customizable in the GUI:
 * model_path - Provides the option to specify the location of custom models.
 * audio_tokenizer - Provides the option to specify the location of custom tokenizers.
+* max_new_tokens - Slider for setting custom maximum number of new tokens to generate.  Default is 2048
 * device - Selectable options for loading on Cuda, MPS, CPU or Auto select.
 * use_static_kv_cache - Enable or Disable option
 * transcript - Text to be generated into audio.  This supports long-form generations!
@@ -22,7 +23,6 @@ This does NOT require a modified installation of Higgs v2, you will simply add a
 * seed - Manually set Seed
 
 ### Advanced Options:
-* max_new_tokens - Customizable maximum number of new tokens to generate.  Default is 2048
 * chunk_method - Selectable options for setting text chunking.  Options are "None, Speaker, Word"
 * chunk_max_word_num - Slider for setting custom maximum number of words for each chunk.  Only supported when "Word" chunking is selected
 * chunk_max_num_turns - Slider for setting custom maximum number of turns for each chunk.  Only supported when "Speaker" chunking is selected
