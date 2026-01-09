@@ -419,7 +419,6 @@ def generate_audio(
     scene_prompt_text,
     ref_audio,
     ref_audio_in_system_message,
-    max_new_tokens_gen,
     chunk_method,
     chunk_max_word_num,
     chunk_max_num_turns,
@@ -436,10 +435,6 @@ def generate_audio(
     
     if model_client is None:
         return None, "Please initialize the model first!"
-    
-    # Temporarily update max_new_tokens for this generation
-    original_max_new_tokens = model_client._max_new_tokens
-    model_client._max_new_tokens = int(max_new_tokens_gen)
     
     pattern = re.compile(r"\[(SPEAKER\d+)\]")
     transcript = transcript_text.strip()
@@ -502,9 +497,6 @@ def generate_audio(
 
     output_path = "gradio_output.wav"
     sf.write(output_path, concat_wv, sr)
-    
-    # Restore original max_new_tokens
-    model_client._max_new_tokens = original_max_new_tokens
     
     return output_path, f"Audio generated successfully!\nSample rate: {sr} Hz"
 
@@ -608,12 +600,6 @@ with gr.Blocks(title="HiggsAudio Generator") as demo:
                 )
         
         with gr.Accordion("Advanced Options", open=False):
-            max_new_tokens_gen = gr.Number(
-                label="Max New Tokens",
-                value=2048,
-                precision=0,
-                info="Maximum number of new tokens to generate for this audio"
-            )
             chunk_method = gr.Radio(
                 choices=["None", "speaker", "word"],
                 value="None",
@@ -646,7 +632,7 @@ with gr.Blocks(title="HiggsAudio Generator") as demo:
             fn=generate_audio,
             inputs=[
                 transcript_text, scene_prompt_text, ref_audio, ref_audio_in_system,
-                max_new_tokens_gen, chunk_method, chunk_max_word_num, chunk_max_num_turns,
+                chunk_method, chunk_max_word_num, chunk_max_num_turns,
                 generation_chunk_buffer_size, temperature, top_k, top_p,
                 ras_win_len, ras_win_max_num_repeat, seed
             ],
