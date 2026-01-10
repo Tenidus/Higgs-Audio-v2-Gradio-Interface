@@ -1,7 +1,7 @@
 # Higgs-Audio-v2-Gradio-Interface
 ## This is a Gradio/Web interface for Higgs Audio v2.  Chunking for long-form audio generation included, and multi-speaker.
 
-## Model setup tab
+## Model Setup tab
 <img width="1488" height="781" alt="Screenshot_1" src="https://github.com/user-attachments/assets/4467a513-625c-48cd-b92f-9c541c0965dc" />
 
 ## Generate Audio tab
