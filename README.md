@@ -52,7 +52,7 @@ Before Text to Speech generation, it will automatically load and unload the mode
 
 ## **Installation**:
 Download the "higgs_audio_gradio.py"
-Place it in the "higgs-audio/examples" folder (Replace "higgs-audio" directory for the correct directory name if you have a custom name)
+Place it in the "higgs-audio/examples" folder (Replace "higgs-audio" directory for the correct directory name if you have a custom location)
 
 **Activate your python environment:**
 ### If you used Option 2: Using venv for the install:
