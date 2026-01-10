@@ -381,6 +381,108 @@ def prepare_generation_context(scene_prompt, ref_audio, ref_audio_in_system_mess
     return messages, audio_ids
 
 
+def get_available_voice_prompts():
+    """Get list of available voice prompts from the voice_prompts folder."""
+    voice_prompts_dir = os.path.join(CURR_DIR, "voice_prompts")
+    
+    if not os.path.exists(voice_prompts_dir):
+        return ["None"]
+    
+    # Get all .wav files in the directory
+    wav_files = [f for f in os.listdir(voice_prompts_dir) if f.endswith('.wav')]
+    
+    # Remove .wav extension
+    voice_names = [os.path.splitext(f)[0] for f in wav_files]
+    
+    # Add "None" option at the beginning
+    voice_names.insert(0, "None")
+    
+    return voice_names
+
+
+def save_custom_voice(audio_file, reference_text, voice_name):
+    """Save custom voice audio and transcription to voice_prompts folder."""
+    if audio_file is None:
+        return "Please upload an audio file.", gr.Dropdown(choices=get_available_voice_prompts(), value="None")
+    
+    if not reference_text or not reference_text.strip():
+        return "Please provide reference text transcription.", gr.Dropdown(choices=get_available_voice_prompts(), value="None")
+    
+    if not voice_name or not voice_name.strip():
+        return "Please provide a name for the custom voice.", gr.Dropdown(choices=get_available_voice_prompts(), value="None")
+    
+    # Clean voice name (remove special characters, spaces)
+    voice_name = re.sub(r'[^\w\-]', '_', voice_name.strip())
+    
+    voice_prompts_dir = os.path.join(CURR_DIR, "voice_prompts")
+    
+    # Create voice_prompts directory if it doesn't exist
+    if not os.path.exists(voice_prompts_dir):
+        os.makedirs(voice_prompts_dir)
+    
+    try:
+        # Save audio file
+        audio_path = os.path.join(voice_prompts_dir, f"{voice_name}.wav")
+        
+        # Load the uploaded audio and save as WAV
+        import shutil
+        shutil.copy(audio_file, audio_path)
+        
+        # Save transcription text
+        text_path = os.path.join(voice_prompts_dir, f"{voice_name}.txt")
+        with open(text_path, 'w', encoding='utf-8') as f:
+            f.write(reference_text.strip())
+        
+        # Update the dropdown with new voice
+        updated_choices = get_available_voice_prompts()
+        
+        return f"Custom voice '{voice_name}' saved successfully!", gr.Dropdown(choices=updated_choices, value=voice_name)
+    
+    except Exception as e:
+        return f"Error saving custom voice: {str(e)}", gr.Dropdown(choices=get_available_voice_prompts(), value="None")
+
+
+def load_transcript_file(file):
+    """Load and clean transcript from uploaded .txt file."""
+    if file is None:
+        return "", "No file uploaded."
+    
+    try:
+        # Read the file
+        with open(file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Clean the text
+        # Remove excessive whitespace and normalize line breaks
+        lines = content.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Remove leading/trailing whitespace and tabs
+            cleaned_line = line.strip()
+            # Replace multiple spaces with single space
+            cleaned_line = re.sub(r'\s+', ' ', cleaned_line)
+            if cleaned_line:  # Only add non-empty lines
+                cleaned_lines.append(cleaned_line)
+        
+        # Join lines with single newline
+        cleaned_content = '\n'.join(cleaned_lines)
+        
+        # Remove any remaining problematic characters (keep common punctuation)
+        # Allow: letters, numbers, spaces, newlines, and common punctuation
+        cleaned_content = re.sub(r'[^\w\s\[\]\(\)\.,!?\-\'";\n°]', '', cleaned_content)
+        
+        return cleaned_content, f"File loaded successfully! ({len(cleaned_content)} characters) - You can now edit the text."
+    
+    except Exception as e:
+        return "", f"Error loading file: {str(e)}"
+
+
+def clear_transcript_file():
+    """Clear the uploaded transcript file and re-enable manual input."""
+    return "", "Transcript input cleared."
+
+
 # Global model client (initialized once)
 model_client = None
 
@@ -414,11 +516,54 @@ def initialize_model(model_path, audio_tokenizer_path, max_new_tokens, device, u
     return "Model initialized successfully!"
 
 
+def unload_model():
+    """Unload the model from RAM/VRAM."""
+    global model_client
+    
+    if model_client is None:
+        return "No model loaded to unload."
+    
+    try:
+        # Clear CUDA cache if using GPU
+        if hasattr(model_client, '_device'):
+            if 'cuda' in model_client._device:
+                torch.cuda.empty_cache()
+            elif model_client._device == 'mps':
+                torch.mps.empty_cache()
+        
+        # Delete model components
+        if hasattr(model_client, '_model'):
+            del model_client._model
+        if hasattr(model_client, '_audio_tokenizer'):
+            del model_client._audio_tokenizer
+        if hasattr(model_client, 'kv_caches'):
+            del model_client.kv_caches
+        
+        # Delete the model client
+        del model_client
+        model_client = None
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Clear cache again after deletion
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        
+        return "Model unloaded successfully! Memory freed."
+    except Exception as e:
+        return f"Error unloading model: {str(e)}"
+
+
 def generate_audio(
     transcript_text,
     scene_prompt_text,
     ref_audio,
     ref_audio_in_system_message,
+    max_new_tokens_gen,
     chunk_method,
     chunk_max_word_num,
     chunk_max_num_turns,
@@ -429,16 +574,59 @@ def generate_audio(
     ras_win_len,
     ras_win_max_num_repeat,
     seed,
+    model_path,
+    audio_tokenizer_path,
+    max_new_tokens_init,
+    device,
+    use_static_kv_cache,
 ):
     """Generate audio from text using HiggsAudio."""
     global model_client
     
-    if model_client is None:
-        return None, "Please initialize the model first!"
+    # Check if model is loaded, if not, load it
+    model_was_loaded = model_client is not None
+    
+    if not model_was_loaded:
+        try:
+            # Initialize model
+            if device == "auto":
+                if torch.cuda.is_available():
+                    device_to_use = "cuda:0"
+                elif torch.backends.mps.is_available():
+                    device_to_use = "mps"
+                else:
+                    device_to_use = "cpu"
+            else:
+                device_to_use = device
+            
+            audio_tokenizer_device = "cpu" if device_to_use == "mps" else device_to_use
+            audio_tokenizer = load_higgs_audio_tokenizer(audio_tokenizer_path, device=audio_tokenizer_device)
+            
+            if device_to_use == "mps" and use_static_kv_cache:
+                use_static_kv_cache = False
+            
+            model_client = HiggsAudioModelClient(
+                model_path=model_path,
+                audio_tokenizer=audio_tokenizer,
+                device=device_to_use,
+                device_id=None,
+                max_new_tokens=max_new_tokens_init,
+                use_static_kv_cache=use_static_kv_cache,
+            )
+            logger.info("Model loaded automatically for generation")
+        except Exception as e:
+            return None, f"Error loading model: {str(e)}"
+    
+    # Temporarily update max_new_tokens for this generation
+    original_max_new_tokens = model_client._max_new_tokens
+    model_client._max_new_tokens = int(max_new_tokens_gen)
     
     pattern = re.compile(r"\[(SPEAKER\d+)\]")
     transcript = transcript_text.strip()
     scene_prompt = scene_prompt_text.strip() if scene_prompt_text else None
+    
+    # Handle reference audio selection
+    ref_audio_value = None if ref_audio == "None" or not ref_audio else ref_audio
     
     speaker_tags = sorted(set(pattern.findall(transcript)))
     transcript = normalize_chinese_punctuation(transcript)
@@ -469,7 +657,7 @@ def generate_audio(
 
     messages, audio_ids = prepare_generation_context(
         scene_prompt=scene_prompt,
-        ref_audio=ref_audio if ref_audio else None,
+        ref_audio=ref_audio_value,
         ref_audio_in_system_message=ref_audio_in_system_message,
         audio_tokenizer=model_client._audio_tokenizer,
         speaker_tags=speaker_tags,
@@ -482,23 +670,65 @@ def generate_audio(
         chunk_max_num_turns=chunk_max_num_turns,
     )
 
-    concat_wv, sr, text_output = model_client.generate(
-        messages=messages,
-        audio_ids=audio_ids,
-        chunked_text=chunked_text,
-        generation_chunk_buffer_size=generation_chunk_buffer_size if generation_chunk_buffer_size > 0 else None,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        ras_win_len=ras_win_len,
-        ras_win_max_num_repeat=ras_win_max_num_repeat,
-        seed=seed if seed > 0 else None,
-    )
+    try:
+        concat_wv, sr, text_output = model_client.generate(
+            messages=messages,
+            audio_ids=audio_ids,
+            chunked_text=chunked_text,
+            generation_chunk_buffer_size=generation_chunk_buffer_size if generation_chunk_buffer_size > 0 else None,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            ras_win_len=ras_win_len,
+            ras_win_max_num_repeat=ras_win_max_num_repeat,
+            seed=seed if seed > 0 else None,
+        )
 
-    output_path = "gradio_output.wav"
-    sf.write(output_path, concat_wv, sr)
+        output_path = "gradio_output.wav"
+        sf.write(output_path, concat_wv, sr)
+        
+        # Restore original max_new_tokens
+        model_client._max_new_tokens = original_max_new_tokens
+        
+        result_message = f"Audio generated successfully!\nSample rate: {sr} Hz"
+        
+    except Exception as e:
+        output_path = None
+        result_message = f"Error during generation: {str(e)}"
     
-    return output_path, f"Audio generated successfully!\nSample rate: {sr} Hz"
+    # Unload model after generation to free memory
+    if not model_was_loaded:
+        try:
+            if hasattr(model_client, '_device'):
+                if 'cuda' in model_client._device:
+                    torch.cuda.empty_cache()
+                elif model_client._device == 'mps':
+                    torch.mps.empty_cache()
+            
+            if hasattr(model_client, '_model'):
+                del model_client._model
+            if hasattr(model_client, '_audio_tokenizer'):
+                del model_client._audio_tokenizer
+            if hasattr(model_client, 'kv_caches'):
+                del model_client.kv_caches
+            
+            del model_client
+            model_client = None
+            
+            import gc
+            gc.collect()
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            
+            result_message += "\nModel unloaded to free memory."
+            logger.info("Model unloaded automatically after generation")
+        except Exception as e:
+            result_message += f"\nNote: Error during model unload: {str(e)}"
+    
+    return output_path, result_message
 
 
 # Create Gradio interface
@@ -545,22 +775,73 @@ with gr.Blocks(title="HiggsAudio Generator") as demo:
     with gr.Tab("Generate Audio"):
         with gr.Row():
             with gr.Column():
+                gr.Markdown("### Generation")
                 transcript_text = gr.Textbox(
                     label="Transcript",
                     placeholder="Enter the text to convert to speech...",
                     lines=10,
                     info="Use [SPEAKER0], [SPEAKER1] tags for multi-speaker"
                 )
+                
+                clear_file_btn = gr.Button("Clear Transcript", variant="secondary", size="sm")
+                
+                transcript_file = gr.File(
+                    label="Or Upload Transcript File (.txt)",
+                    file_types=[".txt"],
+                    type="filepath"
+                )
+                
+                transcript_file_status = gr.Textbox(label="File Status", interactive=False)
+                
+                transcript_file.change(
+                    fn=load_transcript_file,
+                    inputs=[transcript_file],
+                    outputs=[transcript_text, transcript_file_status]
+                )
+                
+                clear_file_btn.click(
+                    fn=clear_transcript_file,
+                    inputs=[],
+                    outputs=[transcript_text, transcript_file_status]
+                )
+                
                 scene_prompt_text = gr.Textbox(
                     label="Scene Prompt (Optional)",
                     placeholder="Describe the acoustic environment...",
                     lines=3
                 )
-                ref_audio = gr.Textbox(
+                ref_audio = gr.Dropdown(
                     label="Reference Audio (Optional)",
-                    placeholder="e.g., belinda or belinda,chadwick for multi-speaker",
-                    info="Leave empty to let model choose voice"
+                    choices=get_available_voice_prompts(),
+                    value="None",
+                    info="Select a voice prompt or 'None' to let model choose"
                 )
+                
+                with gr.Accordion("Add Custom Voice", open=False, visible=True):
+                    custom_voice_name = gr.Textbox(
+                        label="Custom Voice Name",
+                        placeholder="e.g., my_voice, john_doe",
+                        info="Name for your custom voice (will be sanitized)"
+                    )
+                    custom_audio = gr.Audio(
+                        label="Custom Voice Audio",
+                        type="filepath"
+                    )
+                    custom_ref_text = gr.Textbox(
+                        label="Custom Reference Text",
+                        placeholder="Transcription of the custom audio file...",
+                        lines=3,
+                        info="Provide the exact transcription of what's spoken in the audio"
+                    )
+                    save_custom_btn = gr.Button("Save Custom Voice", variant="secondary")
+                    custom_voice_status = gr.Textbox(label="Custom Voice Status", interactive=False)
+                
+                save_custom_btn.click(
+                    fn=save_custom_voice,
+                    inputs=[custom_audio, custom_ref_text, custom_voice_name],
+                    outputs=[custom_voice_status, ref_audio]
+                )
+                
                 ref_audio_in_system = gr.Checkbox(
                     label="Include Reference Audio in System Message",
                     value=False
@@ -600,6 +881,12 @@ with gr.Blocks(title="HiggsAudio Generator") as demo:
                 )
         
         with gr.Accordion("Advanced Options", open=False):
+            max_new_tokens_gen = gr.Number(
+                label="Max New Tokens",
+                value=2048,
+                precision=0,
+                info="Maximum number of new tokens to generate for this audio"
+            )
             chunk_method = gr.Radio(
                 choices=["None", "speaker", "word"],
                 value="None",
@@ -632,22 +919,28 @@ with gr.Blocks(title="HiggsAudio Generator") as demo:
             fn=generate_audio,
             inputs=[
                 transcript_text, scene_prompt_text, ref_audio, ref_audio_in_system,
-                chunk_method, chunk_max_word_num, chunk_max_num_turns,
+                max_new_tokens_gen, chunk_method, chunk_max_word_num, chunk_max_num_turns,
                 generation_chunk_buffer_size, temperature, top_k, top_p,
-                ras_win_len, ras_win_max_num_repeat, seed
+                ras_win_len, ras_win_max_num_repeat, seed,
+                model_path, audio_tokenizer_path, max_new_tokens, device, use_static_kv_cache
             ],
             outputs=[audio_output, status_output]
         )
     
     gr.Markdown("""
     ### Usage Tips:
-    1. **Initialize the model first** in the "Model Setup" tab
-    2. For multi-speaker: Use `[SPEAKER0]`, `[SPEAKER1]` tags in your transcript
-    3. For sound effects: Use tags like `[laugh]`, `[music]`, `[applause]`
-    4. Adjust temperature for more/less variation in speech
-    5. Use chunking for very long texts
+    1. **Model auto-loads** before generation and auto-unloads after to save memory
+    2. You can manually initialize the model in "Model Setup" to keep it loaded between generations
+    3. **Select a voice prompt** from the dropdown or choose "None" for random voice
+    4. **Upload a .txt file** to automatically populate the transcript (you can still edit it)
+    5. For multi-speaker: Use `[SPEAKER0]`, `[SPEAKER1]` tags in your transcript
+    6. For sound effects: Use tags like `[laugh]`, `[music]`, `[applause]`
+    7. Adjust temperature for more/less variation in speech
+    8. Use chunking for very long texts
+    
+    **Note:** Voice prompts are loaded from the `voice_prompts` folder. Add .wav files there to expand options.
     """)
 
 
 if __name__ == "__main__":
-    demo.launch(share=False)
+    demo.launch(share=True)
